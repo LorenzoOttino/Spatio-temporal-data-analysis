@@ -1,3 +1,3 @@
 # Spatio-temporal-data-analysis
  
-This repository holds all code about my thesis.
+This repository holds all the code about my thesis.
