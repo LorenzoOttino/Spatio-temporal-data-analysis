@@ -1,13 +1,12 @@
 from pyspark.ml.fpm import PrefixSpan
 import pyspark.sql.functions as F
 import pandas as pd
-import numpy as np
 import sys
 import matplotlib.pyplot as plt
-import operator
 import os
+import time
+from datetime import datetime
 from Additional_tools import *
-
 
 class Pattern_Extractor():
     def __init__(self, interval, maxDelta, th, window_size, status_path, station_path, spark, sc):
@@ -59,6 +58,13 @@ class Pattern_Extractor():
         if neighborhood_type=='indegree':
             edge_importance_df = self.sc.broadcast(pd.read_csv(importance_path))
             
+        interval = self.interval
+        window_size = self.window_size
+        maxDelta = self.maxDelta
+        th = self.th
+        # BEWARE: '2013-08-29 12:06' IS THE BASE TIME FOR OUR PARTICULAR DATASET
+        base_time = int(time.mktime(datetime(2013, 8, 29, 12, 6).timetuple())/(interval*60)) + 1 # windows will start from 1
+        
         # load data
         inputDF = self.spark.read.format("csv").option("delimiter", ",").option("header", True).option("inferSchema", True).load(self.status_path)
 
@@ -82,9 +88,16 @@ class Pattern_Extractor():
         
         # create rdd and group into interval
         my_rdd = ss.rdd.map(tuple)
-        interval = self.interval
         
-        rdd = my_rdd.map(lambda line: (line[0], line[1], line[2], line[3], line[4], int(line[5]/interval), line[6])).distinct()
+        # map to Unix time and cluster into interval:
+        # to have small numbers, the min(time) of the dataset (already calculated) is subtracted in each window
+        def mapToUnixTime(line):
+            timestamp = datetime(line[1], line[2], line[3], line[4], line[5])
+            unixtime = time.mktime(timestamp.timetuple())
+
+            return line[0], int(unixtime/(interval*60)) - base_time, int(unixtime), line[6]
+        
+        rdd = my_rdd.map(mapToUnixTime)
 
         # get distinct stations to calculate distances
         id_stations = rdd.map(lambda line: line[0]).distinct()
@@ -93,44 +106,34 @@ class Pattern_Extractor():
         
         # obtain timestamp and info
         if extraction_type == 'Full-AlmostFull':
-            get_map = rdd.map(getMapF)
+            get_map = rdd.map(getMapF).distinct()
         else:# extraction_type == 'Empty-AlmostEmpty':
-            get_map = rdd.map(getMapE)
+            get_map = rdd.map(getMapE).distinct()
 
         # for each timestamp obtain info
         reduceK = get_map.reduceByKey(lambda l1, l2 :(l1+','+l2)).sortByKey()
-        my_df = reduceK.toDF()
-
-        my_df.createOrReplaceTempView("view")
-        s2 = self.spark.sql("""SELECT ROW_NUMBER() OVER(ORDER BY _1,_2) as id ,_1, _2 FROM view""")
-
-        #identifier of the timestamp, info
-        rdd_scheme = s2.rdd.map(tuple).map(lambda line: (line[0], line[2]))
         
-        window_size = self.window_size
         #obtain window, station-status
         def giveSplit(line):   
             id_window = (int(line[0]))
             lista = []
             counter = id_window    
-            while counter >= 1:
-                lista.append(('Window '+ str(counter), (line[1])))
+            while counter >= 0:
+                lista.append(('Window '+ str(counter), (id_window, (line[1]))))
                 counter = counter-1
                 if(id_window-counter)==window_size:
                     return lista  
             return lista
-        mapData = rdd_scheme.flatMap(giveSplit)
+        mapData = reduceK.flatMap(giveSplit)
 
         # for each window get all info
-        all_keys = mapData.reduceByKey(lambda l1,l2:(l1+'-'+l2))
+        all_keys = mapData.groupByKey().mapValues(ordered_state_mapper)
 
         #finestra temporale
         windows = all_keys.flatMap(reduceKeys)
         
         dict_distances = self.get_station_info(tot_id_stations)
         
-        maxDelta = self.maxDelta
-        th = self.th
         #Apply “Spatial Delta”
         def giveSpatialWindow(line):            
             lista=[]    

@@ -1,6 +1,8 @@
+import time
 from datetime import datetime
 from math import sin, cos, sqrt, atan2, radians
 from pyspark.sql import Row
+import numpy as np
 
 def stateFunctionF(docks_available, bikes_available):
     if docks_available==0:
@@ -19,14 +21,10 @@ def stateFunctionE(docks_available,bikes_available):
         return 2
 
 def getMapF(line):
-    id_station = str(line[0])
-    year = int(line[1])
-    month = int(line[2])
-    day = int(line[3])
-    hour = int(line[4])
-    minute = int(line[5])   
-    timestamp = datetime(year, month, day, hour, minute)  
-    status = int(line[6])
+    id_station = str(line[0])   
+    timestamp = line[1]
+    status = int(line[3])
+    
     if status==0:
         status='AlmostFull'
     else:
@@ -36,13 +34,9 @@ def getMapF(line):
 
 def getMapE(line):
     id_station=str(line[0])
-    year=int(line[1])
-    month=int(line[2])
-    day=int(line[3])
-    hour=int(line[4])
-    minute=int(line[5])   
-    timestamp= datetime(year,month, day, hour, minute)  
-    status=int(line[6])
+    timestamp= line[1]
+    status=int(line[3])
+    
     if status==0:
         status='AlmostEmpty'
     else:
@@ -50,6 +44,26 @@ def getMapE(line):
     info=id_station.split('.')[0]+'_'+status
     return ( (timestamp,info))
 
+# map tuple of timestamps and states to ordered states
+def ordered_state_mapper(l):
+    window_ids = []
+    states = []
+    
+    # sort states
+    for el in l:
+        window_ids.append(el[0])
+        states.append(el[1])
+
+    # concatenate the string
+    for i, idx in enumerate(np.argsort(window_ids)):
+        if i == 0:
+            string = states[idx]
+        else:
+            string = string + '-' + states[idx]
+    
+    return string
+
+# write T0, T1, ecc.
 def reduceKeys(line):   
     lista=[]
     #lista.append(line[0])
