@@ -42,7 +42,7 @@ def getMapE(line):
     else:
         status='Empty'
     info=id_station.split('.')[0]+'_'+status
-    return ( (timestamp,info))
+    return ((timestamp,info))
 
 # map tuple of timestamps and states to ordered states
 def ordered_state_mapper(l):

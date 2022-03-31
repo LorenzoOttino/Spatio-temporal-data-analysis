@@ -47,9 +47,9 @@ class Pattern_Extractor():
         return dict_distances
 
 
-    def extract_items(self, extraction_type, neighborhood_type='distance', n_neighbors=10, importance_path='../../Data/edge_importance.csv'):
+    def extract_items(self, extraction_type, neighborhood_type='distance', n_neighbors=5, incr_dec_threshold=2, importance_path='../../Data/edge_importance.csv'):
         # parameters checking
-        if not (extraction_type=='Full-AlmostFull' or extraction_type=='Empty-AlmostEmpty'):
+        if not (extraction_type=='Full-AlmostFull' or extraction_type=='Empty-AlmostEmpty' or extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'):
             raise(NameError('Wrong extraction_type name'))        
         if not (neighborhood_type=='distance' or neighborhood_type=='indegree'):
             raise(NameError('Wrong neighborhood_type name'))
@@ -63,7 +63,7 @@ class Pattern_Extractor():
         maxDelta = self.maxDelta
         th = self.th
         # BEWARE: '2013-08-29 12:06' IS THE BASE TIME FOR OUR PARTICULAR DATASET
-        base_time = int(time.mktime(datetime(2013, 8, 29, 12, 6).timetuple())/(interval*60)) + 1 # windows will start from 1
+        base_time = int(time.mktime(datetime(2013, 8, 29, 12, 6).timetuple())/(interval*60))
         
         # load data
         inputDF = self.spark.read.format("csv").option("delimiter", ",").option("header", True).option("inferSchema", True).load(self.status_path)
@@ -72,43 +72,114 @@ class Pattern_Extractor():
         inputDF = inputDF.filter("bikes_available is not null")
         filteredDF = inputDF.filter("docks_available<>0 OR bikes_available<>0")
 
-        if extraction_type == 'Full-AlmostFull':
-            self.spark.udf.register("state", stateFunctionF)
-        else:# extraction_type == 'Empty-AlmostEmpty':
-            self.spark.udf.register("state", stateFunctionE)
+        if extraction_type == 'Full-AlmostFull' or extraction_type == 'Empty-AlmostEmpty':
+            if extraction_type == 'Full-AlmostFull':
+                self.spark.udf.register("state", stateFunctionF)
+            else:# extraction_type == 'Empty-AlmostEmpty'
+                self.spark.udf.register("state", stateFunctionE)
+
+            getStatusDF = filteredDF.selectExpr("station_id", "time", "state(docks_available, bikes_available) as status")
+
+            # filter only full or almost full stations
+            recordsDF = getStatusDF.filter("status==1  or status==0")
+
+            # map to Unix time and cluster into interval:
+            # to have small numbers, the min(time) of the dataset (already calculated) is subtracted in each window
+            def mapToUnixTime(line):
+                timestamp = datetime(line[1], line[2], line[3], line[4], line[5])
+                unixtime = time.mktime(timestamp.timetuple())
+
+                return line[0], int(unixtime/(interval*60)) - base_time, int(unixtime), line[6]
             
-        getStatusDF = filteredDF.selectExpr("station_id", "time", "state(docks_available, bikes_available) as status")
-
-        # filter only full or almost full stations
-        full_almostFull = getStatusDF.filter("status==1  or status==0")
-        full_almostFull.createOrReplaceTempView("readings")
-
-        # select station, year, month, day, hour, minute, status ordered by time
-        ss = self.spark.sql("""SELECT  station_id , YEAR(time) as year, MONTH(time) as month, DAY(time) as day, HOUR(time)as hour, MINUTE(time) as minute, status FROM readings GROUP BY station_id, year, month, day, hour, minute, status ORDER BY  station_id, year, month, day, hour, minute""")
+            unixRecords = recordsDF.rdd.map(tuple).map(mapToUnixTime)
         
-        # create rdd and group into interval
-        my_rdd = ss.rdd.map(tuple)
-        
-        # map to Unix time and cluster into interval:
-        # to have small numbers, the min(time) of the dataset (already calculated) is subtracted in each window
-        def mapToUnixTime(line):
-            timestamp = datetime(line[1], line[2], line[3], line[4], line[5])
-            unixtime = time.mktime(timestamp.timetuple())
+        else:# extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'
+            # map (ID, bikes, docks, time) -> ((ID, window), (time, docks, bikes))
+            def mapIdWindow_TimeStats(line):
+                stationId = line[0]
+                timestamp = line[3]
+                docks = line[2]
+                bikes = line[1]
 
-            return line[0], int(unixtime/(interval*60)) - base_time, int(unixtime), line[6]
-        
-        rdd = my_rdd.map(mapToUnixTime)
+                unixtime = time.mktime(timestamp.timetuple())
+                window = int(unixtime/(interval*60)) - base_time
+
+                return ((stationId, window), (int(unixtime), int(docks), int(bikes)))
+            
+            station_windowRdd = filteredDF.rdd.map(mapIdWindow_TimeStats)
+            groupedSWRdd = station_windowRdd.groupByKey()
+            
+            # flatMap ((ID, window), (time, docks, bikes)) -> [(ID, window, state),...]
+            def increase_decrease_state_mapper(line):
+                window_ids = []
+                stats = []
+                hasCritical = False
+                hasAlmostCritical = False
+                hasIncrease = False
+                hasDecrease = False
+
+                # sort states
+                for el in line[1]:
+                    window_ids.append(el[0])
+                    stats.append((el[1], el[2])) # (docks, bikes)
+                
+                window_states = []
+                
+                # find if we have an increase/decrease above threshold
+                for i, idx in enumerate(np.argsort(window_ids)):
+                    if i == 0:
+                        minval = stats[idx][1] # current number of bikes
+                        maxval = stats[idx][1]
+                    else:
+                        # update variables
+                        if stats[idx][1] < minval:
+                            minval = stats[idx][1]
+                        if stats[idx][1] > maxval:
+                            maxval = stats[idx][1]
+                        
+                        # check increase/decrease
+                        if (stats[idx][1] - minval) > incr_dec_threshold:
+                            if not hasIncrease:
+                                hasIncrease = True
+                                window_states.append((line[0][0], line[0][1], 'Increase'))
+                        if (maxval - stats[idx][1]) > incr_dec_threshold:
+                            if not hasDecrease:
+                                hasDecrease = True
+                                window_states.append((line[0][0], line[0][1], 'Decrease'))
+                        
+                        # check critical/almost state
+                        if extraction_type.split("-")[0] == "Empty":
+                            if (not hasCritical) and stats[idx][1] == 0:
+                                hasCritical = True
+                                window_states.append((line[0][0], line[0][1], extraction_type.split("-")[0]))
+                            elif (not hasAlmostCritical) and stats[idx][1] < 3:
+                                hasAlmostCritical = True
+                                window_states.append((line[0][0], line[0][1], f'Almost{extraction_type.split("-")[0]}'))
+                        
+                        else: # extraction_type.split("-")[0] == "Full"
+                            if (not hasCritical) and (stats[idx][0] - stats[idx][1]) == 0:
+                                hasCritical = True
+                                window_states.append((line[0][0], line[0][1], extraction_type.split("-")[0]))
+                            elif (not hasAlmostCritical) and (stats[idx][0] - stats[idx][1]) < 3:
+                                hasAlmostCritical = True
+                                window_states.append((line[0][0], line[0][1], f'Almost{extraction_type.split("-")[0]}'))
+                    
+                return window_states
+
+            unixRecords = groupedSWRdd.flatMap(increase_decrease_state_mapper)
 
         # get distinct stations to calculate distances
-        id_stations = rdd.map(lambda line: line[0]).distinct()
+        id_stations = unixRecords.map(lambda line: line[0]).distinct()
 
         tot_id_stations = id_stations.collect() # all distinct station ids
         
         # obtain timestamp and info
         if extraction_type == 'Full-AlmostFull':
-            get_map = rdd.map(getMapF).distinct()
-        else:# extraction_type == 'Empty-AlmostEmpty':
-            get_map = rdd.map(getMapE).distinct()
+            get_map = unixRecords.map(getMapF).distinct()
+        elif extraction_type == 'Empty-AlmostEmpty':
+            get_map = unixRecords.map(getMapE).distinct()
+        else:
+            get_map = unixRecords.map(lambda l: (l[1], f"{l[0]}_{l[2]}"))
 
         # for each timestamp obtain info
         reduceK = get_map.reduceByKey(lambda l1, l2 :(l1+','+l2)).sortByKey()
@@ -148,22 +219,25 @@ class Pattern_Extractor():
                 list_tmp=[]
                 topX_neighborhood = []
                 if neighborhood_type=='indegree':
-                    if extraction_type=='Full-AlmostFull':
+                    if extraction_type=='Full-AlmostFull' or extraction_type=='Full-Decrease':
                         topX_neighborhood = edge_importance_df.value[edge_importance_df.value['end_id']==current_station][:n_neighbors]['start_id'].values
-                    else: # extraction_type=='Empty-AlmostEmpty'
+                    else: # extraction_type=='Empty-AlmostEmpty' or extraction_type=='Empty-Decrease'
                         topX_neighborhood = edge_importance_df.value[edge_importance_df.value['start_id']==current_station]\
                         .sort_values(['start_id','count'], ascending=[True, False])[:n_neighbors]['end_id'].values
 
                 #for each window
                 for i, window in enumerate(line[1]):           
                     second_lista=[]
-                    #for each element of a window
-                    for item in window :
-                        #second_lista=[]
+                    #for each element in a window
+                    for item in window:
                         second_station=int(item.split('_')[0])
                         state=item.split('_')[2]
 
                         if current_station!=second_station:
+                            # we are interested in only one state if 
+                            # extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'
+                            if (extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase') and state != extraction_type.split('-')[1]:
+                                continue
                             # check that station is needed or not if neighborhood_type=='indegree'
                             if (not second_station in topX_neighborhood and neighborhood_type=='indegree'):
                                 continue
