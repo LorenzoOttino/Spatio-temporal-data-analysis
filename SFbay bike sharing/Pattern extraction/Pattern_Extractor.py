@@ -47,7 +47,12 @@ class Pattern_Extractor():
         return dict_distances
 
 
-    def extract_items(self, extraction_type, neighborhood_type='distance', n_neighbors=5, incr_dec_threshold=2, importance_path='../../Data/edge_importance.csv'):
+    # wrap_states parameter considers Full == AlmostFull if extraction_type == 'Full-Decrease'.
+    # similar behaviour for 'Empty-Increase'
+    # state_change parameter considers AlmostFull only if state was not AF in the first timestamp if extraction_type == 'Full-Decrease'.
+    # similar behaviour for 'Empty-Increase'
+    
+    def extract_items(self, extraction_type, neighborhood_type='distance', n_neighbors=5, incr_dec_threshold=1, wrap_states=False, state_change=False, importance_path='../../Data/edge_importance.csv'):
         # parameters checking
         if not (extraction_type=='Full-AlmostFull' or extraction_type=='Empty-AlmostEmpty' or extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'):
             raise(NameError('Wrong extraction_type name'))        
@@ -128,8 +133,21 @@ class Pattern_Extractor():
                 # find if we have an increase/decrease above threshold
                 for i, idx in enumerate(np.argsort(window_ids)):
                     if i == 0:
-                        minval = stats[idx][1] # current number of bikes
+                        minval = stats[idx][1] # current number of bikes available
                         maxval = stats[idx][1]
+                        
+                        if state_change:
+                            if extraction_type.split("-")[0] == "Empty":
+                                if stats[idx][1] < 3: # current number of bikes available
+                                    hasAlmostCritical = True
+                                if stats[idx][1] == 0:
+                                    hasCritical = True
+                            else: # extraction_type.split("-")[0] == "Full"
+                                if stats[idx][0] < 3: # current number of docks available
+                                    hasAlmostCritical = True
+                                if stats[idx][0] == 0:
+                                    hasCritical = True
+
                     else:
                         # update variables
                         if stats[idx][1] < minval:
@@ -149,7 +167,7 @@ class Pattern_Extractor():
                         
                         # check critical/almost state
                         if extraction_type.split("-")[0] == "Empty":
-                            if (not hasCritical) and stats[idx][1] == 0:
+                            if (not hasCritical) and stats[idx][1] == 0 and (not wrap_states):
                                 hasCritical = True
                                 window_states.append((line[0][0], line[0][1], extraction_type.split("-")[0]))
                             elif (not hasAlmostCritical) and stats[idx][1] < 3:
@@ -157,10 +175,10 @@ class Pattern_Extractor():
                                 window_states.append((line[0][0], line[0][1], f'Almost{extraction_type.split("-")[0]}'))
                         
                         else: # extraction_type.split("-")[0] == "Full"
-                            if (not hasCritical) and (stats[idx][0] - stats[idx][1]) == 0:
+                            if (not hasCritical) and stats[idx][0] == 0 and (not wrap_states):
                                 hasCritical = True
                                 window_states.append((line[0][0], line[0][1], extraction_type.split("-")[0]))
-                            elif (not hasAlmostCritical) and (stats[idx][0] - stats[idx][1]) < 3:
+                            elif (not hasAlmostCritical) and stats[idx][0] < 3:
                                 hasAlmostCritical = True
                                 window_states.append((line[0][0], line[0][1], f'Almost{extraction_type.split("-")[0]}'))
                     
@@ -256,6 +274,11 @@ class Pattern_Extractor():
                                 label=state+'_'+'T'+str(i)+'_'+str(delta)
                                 second_lista.append(label)
                         else:
+                            # for the "main" station
+                            # we are not interested 'Decrease' state if extraction_type == 'Full-Decrease'
+                            # we are not interested 'Increase' state if extraction_type == 'Empty-Increase'
+                            if  (extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase') and state == extraction_type.split('-')[1]:
+                                continue
                             label=state+'_'+'T'+str(i)+'_'+str(0)
                             second_lista.append(label)
 
