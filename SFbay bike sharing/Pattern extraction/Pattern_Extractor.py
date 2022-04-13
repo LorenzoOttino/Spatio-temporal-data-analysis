@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import os
 import time
 from datetime import datetime
+import ast
+import re
 from Additional_tools import *
 
 class Pattern_Extractor():
@@ -47,12 +49,18 @@ class Pattern_Extractor():
         return dict_distances
 
 
-    # wrap_states parameter considers Full == AlmostFull if extraction_type == 'Full-Decrease'.
-    # similar behaviour for 'Empty-Increase'
-    # state_change parameter considers AlmostFull only if state was not AF in the first timestamp if extraction_type == 'Full-Decrease'.
-    # similar behaviour for 'Empty-Increase'
     
-    def extract_items(self, extraction_type, neighborhood_type='distance', n_neighbors=5, incr_dec_threshold=1, wrap_states=False, state_change=False, importance_path='../../Data/edge_importance.csv'):
+    def extract_items(self, extraction_type, neighborhood_type='distance', n_neighbors=5, incr_dec_threshold=1, wrap_states=False, state_change=False, for_test=False, importance_path='../../Data/edge_importance.csv'):
+        '''
+        Extract all items with specified charachteristics
+        extraction_type: target extraction type
+        neighborhood_type: kind of neighborhood considered
+        n_neighbors: number of neighbors to consider if neighborhood_type=='indegree'
+        incr_dec_threshold: threshold for considering the state decreasing or increasing
+        wrap_states: boolean parameter that considers Full == AlmostFull if extraction_type == 'Full-Decrease'. Similar behaviour for 'Empty-Increase'
+        state_change: boolean parameter that considers AlmostFull only if state was not AF in the first timestamp if extraction_type == 'Full-Decrease'. Similar behaviour for 'Empty-Increase'
+        for_test: extract also 'Normal' state
+        '''
         # parameters checking
         if not (extraction_type=='Full-AlmostFull' or extraction_type=='Empty-AlmostEmpty' or extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'):
             raise(NameError('Wrong extraction_type name'))        
@@ -86,7 +94,8 @@ class Pattern_Extractor():
             getStatusDF = filteredDF.selectExpr("station_id", "time", "state(docks_available, bikes_available) as status")
 
             # filter only full or almost full stations
-            recordsDF = getStatusDF.filter("status==1  or status==0")
+            if not for_test:
+                recordsDF = getStatusDF.filter("status==1  or status==0")
 
             # map to Unix time and cluster into interval:
             # to have small numbers, the min(time) of the dataset (already calculated) is subtracted in each window
@@ -96,7 +105,10 @@ class Pattern_Extractor():
 
                 return line[0], int(unixtime/(interval*60)) - base_time, int(unixtime), line[6]
             
-            unixRecords = recordsDF.rdd.map(tuple).map(mapToUnixTime)
+            if not for_test:
+                unixRecords = recordsDF.rdd.map(tuple).map(mapToUnixTime)
+            else:
+                unixRecords = getStatusDF.rdd.map(tuple).map(mapToUnixTime)
         
         else:# extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'
             # map (ID, bikes, docks, time) -> ((ID, window), (time, docks, bikes))
@@ -181,7 +193,10 @@ class Pattern_Extractor():
                             elif (not hasAlmostCritical) and stats[idx][0] < 3:
                                 hasAlmostCritical = True
                                 window_states.append((line[0][0], line[0][1], f'Almost{extraction_type.split("-")[0]}'))
-                    
+                
+                if not hasAlmostCritical and for_test:
+                    window_states.append((line[0][0], line[0][1], 'Normal'))
+                
                 return window_states
 
             unixRecords = groupedSWRdd.flatMap(increase_decrease_state_mapper)
@@ -233,7 +248,7 @@ class Pattern_Extractor():
 
             for station in time0:# only first window
                 current_station=int(station.split('_')[0])
-                #lista_station=[]
+                
                 list_tmp=[]
                 topX_neighborhood = []
                 if neighborhood_type=='indegree':
@@ -246,6 +261,7 @@ class Pattern_Extractor():
                 #for each window
                 for i, window in enumerate(line[1]):           
                     second_lista=[]
+                    second_lista_items = set()
                     #for each element in a window
                     for item in window:
                         second_station=int(item.split('_')[0])
@@ -270,17 +286,21 @@ class Pattern_Extractor():
                                 while d*th < dist:
                                     d += 1
                                 delta = d
-                                
+
                                 label=state+'_'+'T'+str(i)+'_'+str(delta)
-                                second_lista.append(label)
+                                if label not in second_lista_items:
+                                    second_lista.append(label)
+                                    second_lista_items.add(label)
                         else:
                             # for the "main" station
-                            # we are not interested 'Decrease' state if extraction_type == 'Full-Decrease'
-                            # we are not interested 'Increase' state if extraction_type == 'Empty-Increase'
+                            # we are not interested in 'Decrease' state if extraction_type == 'Full-Decrease'
+                            # we are not interested in 'Increase' state if extraction_type == 'Empty-Increase'
                             if  (extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase') and state == extraction_type.split('-')[1]:
                                 continue
                             label=state+'_'+'T'+str(i)+'_'+str(0)
-                            second_lista.append(label)
+                            if label not in second_lista_items:
+                                second_lista.append(label)
+                                second_lista_items.add(label)
 
                     if len(second_lista)>0:
                         list_tmp.append(second_lista)
@@ -297,14 +317,22 @@ class Pattern_Extractor():
 
         return spatial.toDF()
 
-    #obtain sequence and frequence
+    
     def extract_frequent_items(self, df, support, mpl=5, mlpdbs=5000):
+        '''
+        Obtain sequence and frequence of input patterns
+        returns a DataFrame
+        '''
         prefixSpan = PrefixSpan(minSupport=support, maxPatternLength=mpl, maxLocalProjDBSize=mlpdbs)
         prefix = prefixSpan.findFrequentSequentialPatterns(df)   
 
         return prefix
 
+    
     def save_stats(self, prefix, support, extraction_type, root="../../Results/Extraction/Undefined/Undefined_"):
+        '''
+        Save and print some statistics about extracted patterns
+        '''
         extr_type_critical = extraction_type.split('-')[0]
         extr_type_almostCritical = extraction_type.split('-')[1]
         #output files
@@ -408,7 +436,6 @@ class Pattern_Extractor():
         plt.hist(confidence)
         plt.xlabel('Confidence')
         plt.ylabel('Number of patterns')
-        #plt.title(f'{self.maxDelta} threshold spaziale, {self.window_size} threshold temporale {self.th*1000} m e supporto {support}')
         plt.xlim(0.3,1)
         plt.savefig(img_support)
         plt.close()
@@ -612,3 +639,234 @@ class Pattern_Extractor():
         print(f'The number of patterns in which there is at least one item that repeats within a window is: {repeated_el_window} ')
         print(f'The number of patterns with at least 1 event {extr_type_almostCritical} and 1 event {extr_type_critical} is: {lung_piena_quasipiena}')
         print(f'The number of patterns with at least 1 T0, DELTA S=0 and at least 1 pattern with at least 1 pattern with DELTA S different from 0 and DELTA T different from 0 is: {lung_different_time_space}')
+        
+
+    def save_classification_patterns(self, prefix, output_file):
+        '''
+        Save patterns for calssification
+        '''
+        pre = prefix.rdd.map(tuple)
+        
+        # filter patterns that contain station 0
+        giveT0 = pre.filter(giveSelected)
+        
+        mapDict = giveT0.map(mapValues)
+        
+        li = mapDict.collect()
+        voc={}
+        
+        for el in li:
+            splits=el.split(';')
+            voc[splits[0]]=int(splits[1])
+            
+        repeated_el_window=0
+        for el in voc.keys():
+            flag_rep=False
+            windows=el.split('-')
+            for w in windows:
+                tot_items=len(w.split(','))
+                set_items=len(set(w.split(',')))
+                if tot_items!=set_items:
+                    repeated_el_window+=1
+                    break
+                    
+        voc_supports={}
+        for el in voc.keys():    
+            if len(el.split('-'))>1:        
+                num=int(voc[el])       
+                string=''
+                tot=el.split('-')[:-1]
+                for k,station in enumerate(tot):
+                    if k>0:
+                        string+='-'
+                    string+=station
+                #print(string)
+                den=int(voc[string])
+                voc_supports[el]=str(num/den)+' - '+str(voc[el])
+        keys=list(voc_supports.keys())
+        values=list(voc_supports.values())
+        
+        #sort vocabulary by decreasing values and sort within each window
+        tot_frequence=0
+        for key in voc_supports:    
+            splitted=key.split('-')      
+            splitted.sort()
+            tmp_frequence=int(voc_supports[key].split(' - ')[1])
+            tot_frequence+=tmp_frequence
+        for key in voc_supports:
+            freq= int(voc_supports[key].split(' - ')[1])
+            voc_supports[key]=str(voc_supports[key].split(' - ')[0])+' - ' + str(freq)#+' - '+str(perc_value)+'%'  
+        
+        voc_supports = dict(sorted(voc_supports.items(), 
+                                   key=lambda v: (float(v[1].split(' - ')[0]), int(v[1].split(' - ')[1])),
+                                   reverse=True))
+        
+        file = open(output_file, "w")
+        list_pattern=[]
+        
+        for el in voc_supports:
+            key_list=[]
+            for e in el.split('-'):
+                key_list.append([e])
+            list_pattern.append([[key_list], [voc_supports[el]]])
+            
+        file.write('Pattern, Confidence-Frequence'+'\n')
+        file.write(f'Total number of input patterns: {len(voc_supports)}'+'\n')
+        for el in list_pattern:  
+            file.write(str(el)+ '\n')    
+        file.close() 
+        print(output_file, " saved successfully.")
+        
+        
+    def filter_patterns_conf_sup(self, patterns_path, conf_threshold, sup_threshold, target='AlmostFull'):
+        '''
+        Filter input patterns by confidence and support
+        patterns_path: file containng patterns
+        conf_threshold: max support threshold
+        sup_threshold: min support threshold
+        target: indicate desired critical state
+        returns an RDD
+        '''
+        #read file
+        patterns = self.sc.textFile(patterns_path)
+
+        #remove file headers 
+        patterns = patterns.zipWithIndex().filter(lambda kv: kv[1] > 1).keys()
+
+        #filter patterns containing in the last element only elements with "_0" and {target} state
+        def filtering(line):
+            s_list = ast.literal_eval(line)
+            last = s_list[0][0][-1]
+            list_of_last = last[0].split(',')
+            for el in list_of_last:
+                if "_0" not in el or target not in el:
+                    return False
+            return True
+
+        filtered_patterns = patterns.filter(filtering)
+
+        def conf_sup_filtering(line):
+            s_list = ast.literal_eval(line)
+            conf_sup = s_list[1][0]
+            conf = float(conf_sup.split(' - ')[0])
+            sup = int(conf_sup.split(' - ')[1])
+            if conf >= conf_threshold and sup >= sup_threshold:
+                return True
+            else:
+                return False
+
+        filtered_patterns = filtered_patterns.filter(conf_sup_filtering)
+
+        if filtered_patterns.isEmpty():
+            print("All patterns were filtered.\nPlease choose looser rules.")
+
+        return filtered_patterns
+
+
+    def print_patterns_stats(self, filtered_patterns):
+        '''
+        Print some statistics about the filtered patterns
+        '''
+        #extract confidences list
+        def extract_confidences(line):
+            s_list = ast.literal_eval(line)
+            confidence = s_list[1][0].split(' - ')[0]
+            return float(confidence)
+
+        confidences_list = filtered_patterns.map(extract_confidences).collect()
+
+        #extract suppprts list
+        def extract_supports(line):
+            s_list = ast.literal_eval(line)
+            support = s_list[1][0].split(' - ')[1]
+            return int(support)
+
+        supports_list = filtered_patterns.map(extract_supports).collect()
+
+        # support-confidence plot
+        plt.scatter(supports_list, confidences_list)
+        plt.xlabel('support') 
+        plt.ylabel('confidence')
+        plt.title('Plot img_support_confidence')
+        plt.show()
+
+        # plot the number of pattern with certaion confidence
+        plt.title('Plot img_confidence')
+        plt.hist(confidences_list)
+        plt.xlabel('Confidence')
+        plt.ylabel('Number of patterns')
+        plt.xlim(0,1)
+        plt.show()
+
+        # plot number of patterns >= conf_threshold    
+        conf_trhesholds = [0.1, 0.2, 0.3, 0.40,0.50,0.60,0.70,0.80,0.90,0.100]
+        bincenters = (np.array(conf_trhesholds)[1:] + conf_trhesholds[:-1])/2
+        binwidths = np.diff(conf_trhesholds)
+        binvals = [np.sum(np.array(confidences_list)>=thresh) for thresh in conf_trhesholds[:-1]]
+        fig, ax = plt.subplots()
+        plt.title( f'Plot num patterns >= conf_trashold')
+        ax.bar(bincenters, binvals, width=binwidths, alpha=0.4,
+               edgecolor=['darkblue'])
+        ax.set_xlabel('conf_threshold')
+        ax.set_ylabel('occurences')
+        ax.autoscale('x', tight=True)
+        plt.show()
+
+
+    def test_rules(self, test_items, rules):
+        '''
+        Test filtered associative rules
+        '''
+        
+        br_rules = self.sc.broadcast(rules)
+
+        # perform the prediction:
+        # map (item) -> (y_pred, y_true)
+        # rule structure: [patterns, tag, conf-sup]
+        # line structure: [[patterns, tag]]
+        def predict_item(l):
+            line = l[0]
+            y_true = 'Normal' 
+    
+            if re.search(r'AlmostFull_T._0', str(line[-1])):
+                y_true = 'AlmostFull'
+            
+            y_pred = 'Normal'
+            
+            for rule in br_rules.value:
+                rule_timeslots = rule.split('], ')
+                
+                rule_item_offset = len(rule_timeslots[:-2]) - len(line[:-1])
+                # rule cannot match if it is longer than the event
+                if rule_item_offset > 0:
+                    continue
+
+                for rule_timeslot in rule_timeslots[:-2]:
+                    if all_rule_items_match(rule_timeslot.split(','), line[-rule_item_offset:-1]):
+                        y_pred = 'AlmostFull'
+                        break
+            
+            return (y_pred, y_true)
+        
+        predictions = test_items.rdd.filter(lambda t: len(t[0]) > 1).map(predict_item)
+        
+        br_rules.unpersist()
+        
+        # map (y_pred, y_true) -> (TP|TN|FP|FN, 1)
+        def map_confusion_data(line):
+            if line[0] == line[1]:
+                if line[0]=='AlmostFull':
+                    return ('TP', 1)
+                else:
+                    return ('TN', 1)
+            else:
+                if line[0]=='AlmostFull':
+                    return ('FP', 1)
+                else:
+                    return ('FN', 1)                
+        
+        confusion_data = predictions.map(map_confusion_data)
+        confusion_values = confusion_data.reduceByKey(lambda x1, x2: int(x1)+int(x2))
+        
+        return confusion_values.collectAsMap()
+        

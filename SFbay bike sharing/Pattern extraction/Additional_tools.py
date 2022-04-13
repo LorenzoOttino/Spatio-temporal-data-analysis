@@ -3,6 +3,7 @@ from datetime import datetime
 from math import sin, cos, sqrt, atan2, radians
 from pyspark.sql import Row
 import numpy as np
+import re
 
 def stateFunctionF(docks_available, bikes_available):
     if docks_available==0:
@@ -27,8 +28,10 @@ def getMapF(line):
     
     if status==0:
         status='AlmostFull'
-    else:
+    elif status==1:
         status='Full'
+    else:
+        status='Normal'
     info = id_station.split('.')[0]+'_'+status
     return ((timestamp, info))
 
@@ -39,8 +42,10 @@ def getMapE(line):
     
     if status==0:
         status='AlmostEmpty'
-    else:
+    elif status==1:
         status='Empty'
+    else:
+        status='Normal'
     info=id_station.split('.')[0]+'_'+status
     return ((timestamp,info))
 
@@ -66,9 +71,8 @@ def ordered_state_mapper(l):
 # write T0, T1, ecc.
 def reduceKeys(line):   
     lista=[]
-    #lista.append(line[0])
     line_split=line[1].split("-")
-    #return line_split[0]
+    
     count=len(line_split)
     tot=[]
     for val in range(count):
@@ -123,7 +127,7 @@ def giveSelected(line):
 def mapValues(line):
     seq=line[0]
     final=''
-    #dict[seq]=line[1]
+    
     for i, window in enumerate(seq):
         if i>0:
             final+='-'
@@ -132,4 +136,30 @@ def mapValues(line):
                 final+=','
             final+=el
     final+=(';'+str(line[1])+';'+str(i))
-    return final  
+    return final
+
+def event_has_rule(rule_event, e_window):
+    has_it = False
+    state = re.sub(r"[\[\]']", '', rule_event.split('_')[0])
+    distance = re.sub(r"[\[\]']", '', rule_event.split('_')[2])
+    
+    for e in e_window:
+        if re.match(rf"{state}_T._{distance}", e):
+            has_it = True
+    
+    return has_it
+
+def all_rule_items_match(rule_windows, event_windows):
+    '''
+    rule_windows  = [["Event_T._distance", ...], [...], ...]
+    event_windows = [["Event_T._distance", ...], [...], ...]
+    '''
+    all_match = True
+    
+    for rule_window, event_window in zip(rule_windows, event_windows):
+        for rule_event in rule_window.split(','):
+            if not event_has_rule(rule_event, event_window):
+                all_match = False
+                break
+
+    return all_match
