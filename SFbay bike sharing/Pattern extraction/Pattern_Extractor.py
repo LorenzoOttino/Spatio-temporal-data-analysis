@@ -87,8 +87,25 @@ class Pattern_Extractor():
 
         if extraction_type == 'Full-AlmostFull' or extraction_type == 'Empty-AlmostEmpty':
             if extraction_type == 'Full-AlmostFull':
+                
+                def stateFunctionF(docks_available, bikes_available):
+                    if docks_available==0 and not wrap_states:
+                        return 1
+                    elif (docks_available==0 or docks_available==1 or docks_available==2):
+                        return 0
+                    else:
+                        return 2
+    
                 self.spark.udf.register("state", stateFunctionF)
             else:# extraction_type == 'Empty-AlmostEmpty'
+                
+                def stateFunctionE(docks_available,bikes_available):
+                    if bikes_available==0 and not wrap_states:
+                        return 1
+                    elif (bikes_available==0 or bikes_available==1 or bikes_available==2):
+                        return 0
+                    else:
+                        return 2
                 self.spark.udf.register("state", stateFunctionE)
 
             getStatusDF = filteredDF.selectExpr("station_id", "time", "state(docks_available, bikes_available) as status")
@@ -99,17 +116,24 @@ class Pattern_Extractor():
 
             # map to Unix time and cluster into interval:
             # to have small numbers, the min(time) of the dataset (already calculated) is subtracted in each window
-            def mapToUnixTime(line):
-                timestamp = datetime(line[1], line[2], line[3], line[4], line[5])
-                unixtime = time.mktime(timestamp.timetuple())
+            if not (extraction_type=='Full-AlmostFull' or extraction_type=='Empty-AlmostEmpty'):
+                def mapToUnixTime(line):
+                    timestamp = datetime(line[1], line[2], line[3], line[4], line[5])
+                    unixtime = time.mktime(timestamp.timetuple())
 
-                return line[0], int(unixtime/(interval*60)) - base_time, int(unixtime), line[6]
+                    return line[0], int(unixtime/(interval*60)) - base_time, int(unixtime), line[6]
+            else:
+                def mapToUnixTime(line):
+                    timestamp = line[1]
+                    unixtime = time.mktime(timestamp.timetuple())
+
+                    return line[0], int(unixtime/(interval*60)) - base_time, int(unixtime), line[2]
             
             if not for_test:
                 unixRecords = recordsDF.rdd.map(tuple).map(mapToUnixTime)
             else:
                 unixRecords = getStatusDF.rdd.map(tuple).map(mapToUnixTime)
-        
+            
         else:# extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'
             # map (ID, bikes, docks, time) -> ((ID, window), (time, docks, bikes))
             def mapIdWindow_TimeStats(line):
@@ -214,6 +238,7 @@ class Pattern_Extractor():
         else:
             get_map = unixRecords.map(lambda l: (l[1], f"{l[0]}_{l[2]}"))
 
+        
         # for each timestamp obtain info
         reduceK = get_map.reduceByKey(lambda l1, l2 :(l1+','+l2)).sortByKey()
         
@@ -811,11 +836,48 @@ class Pattern_Extractor():
         ax.set_ylabel('occurences')
         ax.autoscale('x', tight=True)
         plt.show()
+        
 
-
-    def test_rules(self, test_items, rules):
+    def logga(self, test_items, rules, match_threshold=1):
         '''
-        Test filtered associative rules
+        Log matches
+        '''
+        br_rules = self.sc.broadcast(rules)
+
+        match_count = 0
+        # perform the prediction:
+        # map (item) -> (y_pred, y_true)
+        # rule structure: [patterns, tag, conf-sup]
+        # line structure: [[patterns, tag]]
+        def predict_item(l):
+            line = l[0]
+            
+            for rule in br_rules.value:
+                rule_timeslots = rule.split('], ')
+                
+                rule_item_offset = len(rule_timeslots[:-2]) - len(line[:-1])
+                # rule cannot match if it is longer than the event
+                if rule_item_offset > 0:
+                    continue
+
+                if all_rule_items_match(rule_timeslots[:-2], line[-rule_item_offset:-1]):
+                    match_count += 1
+                    
+                if match_count >= match_threshold:
+                    return (rule_timeslots[:-2], line[-rule_item_offset:-1])
+            
+        
+        predictions = test_items.rdd.filter(lambda t: len(t[0]) > 1).map(predict_item)
+        
+        return predictions
+        
+
+    def test_rules(self, test_items, rules, match_threshold=1):
+        '''
+        Test filtered associative rules.
+        test_items: RDD with all items to test
+        rules: list of rules to apply
+        match_threshold: number of rules to match in order to make a positive prediction
         '''
         
         br_rules = self.sc.broadcast(rules)
@@ -826,7 +888,8 @@ class Pattern_Extractor():
         # line structure: [[patterns, tag]]
         def predict_item(l):
             line = l[0]
-            y_true = 'Normal' 
+            y_true = 'Normal'
+            match_count = 0
     
             if re.search(r'AlmostFull_T._0', str(line[-1])):
                 y_true = 'AlmostFull'
@@ -841,10 +904,12 @@ class Pattern_Extractor():
                 if rule_item_offset > 0:
                     continue
 
-                for rule_timeslot in rule_timeslots[:-2]:
-                    if all_rule_items_match(rule_timeslot.split(','), line[-rule_item_offset:-1]):
-                        y_pred = 'AlmostFull'
-                        break
+                if all_rule_items_match(rule_timeslots[:-2], line[-rule_item_offset:-1]):
+                    match_count += 1
+                    
+                if match_count >= match_threshold:
+                    y_pred = 'AlmostFull'
+                    break
             
             return (y_pred, y_true)
         

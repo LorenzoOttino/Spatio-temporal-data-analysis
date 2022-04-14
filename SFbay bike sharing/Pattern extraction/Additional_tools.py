@@ -5,22 +5,6 @@ from pyspark.sql import Row
 import numpy as np
 import re
 
-def stateFunctionF(docks_available, bikes_available):
-    if docks_available==0:
-        return 1
-    elif (docks_available==1 or docks_available==2):
-        return 0
-    else:
-        return 2
-    
-def stateFunctionE(docks_available,bikes_available):
-    if bikes_available==0:
-        return 1
-    elif (bikes_available==1 or bikes_available==2):
-        return 0
-    else:
-        return 2
-
 def getMapF(line):
     id_station = str(line[0])   
     timestamp = line[1]
@@ -33,7 +17,7 @@ def getMapF(line):
     else:
         status='Normal'
     info = id_station.split('.')[0]+'_'+status
-    return ((timestamp, info))
+    return (timestamp, info)
 
 def getMapE(line):
     id_station=str(line[0])
@@ -47,7 +31,7 @@ def getMapE(line):
     else:
         status='Normal'
     info=id_station.split('.')[0]+'_'+status
-    return ((timestamp,info))
+    return (timestamp,info)
 
 # map tuple of timestamps and states to ordered states
 def ordered_state_mapper(l):
