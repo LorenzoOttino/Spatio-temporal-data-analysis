@@ -147,3 +147,26 @@ def all_rule_items_match(rule_windows, event_windows):
                 break
 
     return all_match
+
+def print_test_results(results):
+    '''
+    Needs results as a dictionary with values of the confusion matrix.
+    Prints values and Accuracy, Precision, Recall and F1
+    '''
+    total = sum(results.values())
+    precision = results['TP']/(results['TP']+results['FP'])
+    recall = results['TP']/(results['TP']+results['FN'])
+    
+    print(results, '\n')
+    
+    print("Accuracy score:")
+    print(f"{(results['TP']+results['TN'])/total}\n")
+    
+    print("Precision score:")
+    print(f"{precision}\n")
+    
+    print("Recall score:")
+    print(f"{recall}\n")
+    
+    print("F1 score:")
+    print(f"{2*precision*recall/(precision+recall)}\n")

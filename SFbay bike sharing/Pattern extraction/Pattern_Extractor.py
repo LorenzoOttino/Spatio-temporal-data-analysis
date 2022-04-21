@@ -62,7 +62,7 @@ class Pattern_Extractor():
         for_test: extract also 'Normal' state
         '''
         # parameters checking
-        if not (extraction_type=='Full-AlmostFull' or extraction_type=='Empty-AlmostEmpty' or extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'):
+        if not (extraction_type=='Full-AlmostFull' or extraction_type=='Empty-AlmostEmpty' or extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase' or extraction_type == 'Full-Increase'):
             raise(NameError('Wrong extraction_type name'))        
         if not (neighborhood_type=='distance' or neighborhood_type=='indegree'):
             raise(NameError('Wrong neighborhood_type name'))
@@ -116,25 +116,18 @@ class Pattern_Extractor():
 
             # map to Unix time and cluster into interval:
             # to have small numbers, the min(time) of the dataset (already calculated) is subtracted in each window
-            if not (extraction_type=='Full-AlmostFull' or extraction_type=='Empty-AlmostEmpty'):
-                def mapToUnixTime(line):
-                    timestamp = datetime(line[1], line[2], line[3], line[4], line[5])
-                    unixtime = time.mktime(timestamp.timetuple())
+            def mapToUnixTime(line):
+                timestamp = line[1]
+                unixtime = time.mktime(timestamp.timetuple())
 
-                    return line[0], int(unixtime/(interval*60)) - base_time, int(unixtime), line[6]
-            else:
-                def mapToUnixTime(line):
-                    timestamp = line[1]
-                    unixtime = time.mktime(timestamp.timetuple())
+                return line[0], int(unixtime/(interval*60)) - base_time, int(unixtime), line[2]
 
-                    return line[0], int(unixtime/(interval*60)) - base_time, int(unixtime), line[2]
-            
             if not for_test:
                 unixRecords = recordsDF.rdd.map(tuple).map(mapToUnixTime)
             else:
                 unixRecords = getStatusDF.rdd.map(tuple).map(mapToUnixTime)
             
-        else:# extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'
+        else:# extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'or extraction_type == 'Full-Increase'
             # map (ID, bikes, docks, time) -> ((ID, window), (time, docks, bikes))
             def mapIdWindow_TimeStats(line):
                 stationId = line[0]
@@ -266,8 +259,7 @@ class Pattern_Extractor():
         #Apply “Spatial Delta”
         def giveSpatialWindow(line):            
             lista=[]    
-            time0=line[1][0]    
-            dic={}
+            time0=line[1][0]
 
             count_windows=len(line[1])#tot windows
 
@@ -277,7 +269,7 @@ class Pattern_Extractor():
                 list_tmp=[]
                 topX_neighborhood = []
                 if neighborhood_type=='indegree':
-                    if extraction_type=='Full-AlmostFull' or extraction_type=='Full-Decrease':
+                    if extraction_type=='Full-AlmostFull' or extraction_type=='Full-Decrease'or extraction_type == 'Full-Increase':
                         topX_neighborhood = edge_importance_df.value[edge_importance_df.value['end_id']==current_station][:n_neighbors]['start_id'].values
                     else: # extraction_type=='Empty-AlmostEmpty' or extraction_type=='Empty-Decrease'
                         topX_neighborhood = edge_importance_df.value[edge_importance_df.value['start_id']==current_station]\
@@ -289,14 +281,19 @@ class Pattern_Extractor():
                     second_lista_items = set()
                     #for each element in a window
                     for item in window:
-                        second_station=int(item.split('_')[0])
-                        state=item.split('_')[2]
+                        second_station = int(item.split('_')[0])
+                        state = item.split('_')[2]
+                        
+                        # we are not interested in 'Decrease' state if extraction_type == 'Full-Increase'
+                        if extraction_type == 'Full-Increase' and state == 'Decrease':
+                            continue
 
                         if current_station!=second_station:
                             # we are interested in only one state if 
                             # extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'
                             if (extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase') and state != extraction_type.split('-')[1]:
                                 continue
+                            
                             # check that station is needed or not if neighborhood_type=='indegree'
                             if (not second_station in topX_neighborhood and neighborhood_type=='indegree'):
                                 continue
