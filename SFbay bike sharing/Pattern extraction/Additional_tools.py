@@ -54,7 +54,7 @@ def ordered_state_mapper(l):
 
 # write T0, T1, ecc.
 def reduceKeys(line):   
-    lista=[]
+    
     line_split=line[1].split("-")
     
     count=len(line_split)
@@ -66,8 +66,8 @@ def reduceKeys(line):
             all_string_st=st.split('_')[0]+'_'+'T'+str(val)+'_'+st.split('_')[1]
             li.append(all_string_st)
         tot.append(li)
-    lista.append((line[0],(tot))) 
-    return lista
+    
+    return (line[0],(tot))
 
 #function to retrieve distance between 2 stations
 def getDistance(station1, station2):

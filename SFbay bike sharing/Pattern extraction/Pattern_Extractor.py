@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 import ast
 import re
+from numpy import linspace
 from Additional_tools import *
 
 class Pattern_Extractor():
@@ -143,7 +144,7 @@ class Pattern_Extractor():
             station_windowRdd = filteredDF.rdd.map(mapIdWindow_TimeStats)
             groupedSWRdd = station_windowRdd.groupByKey()
             
-            # flatMap ((ID, window), (time, docks, bikes)) -> [(ID, window, state),...]
+            # flatMap ((ID, window), [(time, docks, bikes), ...]) -> [(ID, window, state),...]
             def increase_decrease_state_mapper(line):
                 window_ids = []
                 stats = []
@@ -231,11 +232,10 @@ class Pattern_Extractor():
         else:
             get_map = unixRecords.map(lambda l: (l[1], f"{l[0]}_{l[2]}"))
 
-        
-        # for each timestamp obtain info
+        # get (window, "State0,State1,...")
         reduceK = get_map.reduceByKey(lambda l1, l2 :(l1+','+l2)).sortByKey()
         
-        #obtain window, station-status
+        #obtain window, station-status for windowing
         def giveSplit(line):   
             id_window = (int(line[0]))
             lista = []
@@ -252,7 +252,7 @@ class Pattern_Extractor():
         all_keys = mapData.groupByKey().mapValues(ordered_state_mapper)
 
         #finestra temporale
-        windows = all_keys.flatMap(reduceKeys)
+        windows = all_keys.map(reduceKeys)
         
         dict_distances = self.get_station_info(tot_id_stations)
         
@@ -262,9 +262,15 @@ class Pattern_Extractor():
             time0=line[1][0]
 
             count_windows=len(line[1])#tot windows
+            stations_done = set()
 
-            for station in time0:# only first window
-                current_station=int(station.split('_')[0])
+            for record in time0:# only first window
+                current_station=int(record.split('_')[0])
+                
+                # skip station if already processed
+                if current_station in stations_done:
+                    continue
+                stations_done.add(current_station)
                 
                 list_tmp=[]
                 topX_neighborhood = []
@@ -331,13 +337,14 @@ class Pattern_Extractor():
             return lista
         
         spatial_app = windows.flatMap(giveSpatialWindow)
+        
         spatial = spatial_app.map(row_seq)
         
         # clear cached file
         if neighborhood_type=='indegree':
             edge_importance_df.unpersist()
 
-        return spatial.toDF()
+        return spatial.filter(lambda l:len(l[0])>0).toDF()
 
     
     def extract_frequent_items(self, df, support, mpl=5, mlpdbs=5000):
@@ -785,7 +792,7 @@ class Pattern_Extractor():
         return filtered_patterns
 
 
-    def print_patterns_stats(self, filtered_patterns):
+    def print_patterns_stats(self, filtered_patterns, conf_threshold):
         '''
         Print some statistics about the filtered patterns
         '''
@@ -821,7 +828,7 @@ class Pattern_Extractor():
         plt.show()
 
         # plot number of patterns >= conf_threshold    
-        conf_trhesholds = [0.1, 0.2, 0.3, 0.40,0.50,0.60,0.70,0.80,0.90,0.100]
+        conf_trhesholds = linspace(conf_threshold, 1, num=int((1-conf_threshold)*10)+1)
         bincenters = (np.array(conf_trhesholds)[1:] + conf_trhesholds[:-1])/2
         binwidths = np.diff(conf_trhesholds)
         binvals = [np.sum(np.array(confidences_list)>=thresh) for thresh in conf_trhesholds[:-1]]
@@ -932,3 +939,14 @@ class Pattern_Extractor():
         
         return confusion_values.collectAsMap()
         
+    def get_test_results(self, results, extraction, neighborhood, conf_threshold, match_threshold):
+        '''
+        Prints values and Accuracy, Precision, Recall and F1 in a format suitable for a csv file
+        '''
+        total = sum(results.values())
+        accuracy = (results['TP']+results['TN'])/total
+        precision = results['TP']/(results['TP']+results['FP'])
+        recall = results['TP']/(results['TP']+results['FN'])
+        f1 = 2*precision*recall/(precision+recall)
+
+        return f"{extraction},{neighborhood},{conf_threshold},{match_threshold},{accuracy},{precision},{recall},{f1},{results['TP']},{results['TN']},{results['FP']},{results['FN']}\n"
