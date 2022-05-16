@@ -12,7 +12,10 @@ from numpy import linspace
 from Additional_tools import *
 
 class Pattern_Extractor():
-    def __init__(self, interval, maxDelta, th, window_size, status_path, station_path, spark, sc):
+    def __init__(self, interval, maxDelta, th, window_size, status_path, station_path, spark, sc, criticality_threshold=3):
+        if criticality_threshold < 1:
+            raise(ValueError("criticality_threshold value is too low. Only values >= 1 are allowed."))
+        
         self.interval = interval
         self.maxDelta = maxDelta
         self.th = th
@@ -20,7 +23,8 @@ class Pattern_Extractor():
         self.status_path = status_path
         self.station_path = station_path
         self.spark = spark
-        self.sc = sc        
+        self.sc = sc
+        self.ct = criticality_threshold
         
     def get_station_info(self, tot_id_stations):
         #load station file
@@ -51,7 +55,7 @@ class Pattern_Extractor():
 
 
     
-    def extract_items(self, extraction_type, neighborhood_type='distance', n_neighbors=5, incr_dec_threshold=1, wrap_states=False, state_change=False, for_test=False, importance_path='../../Data/edge_importance.csv'):
+    def extract_items(self, extraction_type, neighborhood_type='distance', n_neighbors=5, incr_dec_threshold=1, wrap_states=False, state_change=False, for_test=False, drop_nulls=False, time_zone=None, tot_stations=35, importance_path='../../Data/edge_importance.csv'):
         '''
         Extract all items with specified charachteristics
         extraction_type: target extraction type
@@ -61,9 +65,12 @@ class Pattern_Extractor():
         wrap_states: boolean parameter that considers Full == AlmostFull if extraction_type == 'Full-Decrease'. Similar behaviour for 'Empty-Increase'
         state_change: boolean parameter that considers AlmostFull only if state was not AF in the first timestamp if extraction_type == 'Full-Decrease'. Similar behaviour for 'Empty-Increase'
         for_test: extract also 'Normal' state
+        drop_nulls: boolean parameter. If true drops the records that do not have a state for all the stations
+        time_zone:"X-Y". If defined filter only the records in the specified hours
+        tot_stations: number of stations for drop_nulls. Not relevant if drop_nulls=False
         '''
         # parameters checking
-        if not (extraction_type=='Full-AlmostFull' or extraction_type=='Empty-AlmostEmpty' or extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase' or extraction_type == 'Full-Increase'):
+        if not (extraction_type=='Full-AlmostFull' or extraction_type=='Empty-AlmostEmpty' or extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase' or extraction_type == 'Full-Increase' or extraction_type == 'Empty-Decrease'):
             raise(NameError('Wrong extraction_type name'))        
         if not (neighborhood_type=='distance' or neighborhood_type=='indegree'):
             raise(NameError('Wrong neighborhood_type name'))
@@ -76,11 +83,16 @@ class Pattern_Extractor():
         window_size = self.window_size
         maxDelta = self.maxDelta
         th = self.th
+        criticality_threshold = self.ct
         # BEWARE: '2013-08-29 12:06' IS THE BASE TIME FOR OUR PARTICULAR DATASET
         base_time = int(time.mktime(datetime(2013, 8, 29, 12, 6).timetuple())/(interval*60))
         
         # load data
         inputDF = self.spark.read.format("csv").option("delimiter", ",").option("header", True).option("inferSchema", True).load(self.status_path)
+        
+        if time_zone != None:
+            start_h, end_h = time_zone.split("-")
+            inputDF = inputDF.filter(f"HOUR(time) >= {start_h} AND HOUR(time) < {end_h}")
 
         # filter inconsistent data
         inputDF = inputDF.filter("bikes_available is not null")
@@ -92,28 +104,29 @@ class Pattern_Extractor():
                 def stateFunctionF(docks_available, bikes_available):
                     if docks_available==0 and not wrap_states:
                         return 1
-                    elif (docks_available==0 or docks_available==1 or docks_available==2):
+                    elif docks_available < criticality_threshold:
                         return 0
                     else:
                         return 2
-    
+
                 self.spark.udf.register("state", stateFunctionF)
             else:# extraction_type == 'Empty-AlmostEmpty'
                 
                 def stateFunctionE(docks_available,bikes_available):
                     if bikes_available==0 and not wrap_states:
                         return 1
-                    elif (bikes_available==0 or bikes_available==1 or bikes_available==2):
+                    elif bikes_available < criticality_threshold:
                         return 0
                     else:
                         return 2
+
                 self.spark.udf.register("state", stateFunctionE)
 
             getStatusDF = filteredDF.selectExpr("station_id", "time", "state(docks_available, bikes_available) as status")
 
             # filter only full or almost full stations
             if not for_test:
-                recordsDF = getStatusDF.filter("status==1  or status==0")
+                getStatusDF = getStatusDF.filter("status==1  or status==0")
 
             # map to Unix time and cluster into interval:
             # to have small numbers, the min(time) of the dataset (already calculated) is subtracted in each window
@@ -123,12 +136,9 @@ class Pattern_Extractor():
 
                 return line[0], int(unixtime/(interval*60)) - base_time, int(unixtime), line[2]
 
-            if not for_test:
-                unixRecords = recordsDF.rdd.map(tuple).map(mapToUnixTime)
-            else:
-                unixRecords = getStatusDF.rdd.map(tuple).map(mapToUnixTime)
+            unixRecords = getStatusDF.rdd.map(tuple).map(mapToUnixTime)
             
-        else:# extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'or extraction_type == 'Full-Increase'
+        else:# extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'or extraction_type == 'Full-Increase' or extraction_type == 'Empty-Decrease'
             # map (ID, bikes, docks, time) -> ((ID, window), (time, docks, bikes))
             def mapIdWindow_TimeStats(line):
                 stationId = line[0]
@@ -168,15 +178,31 @@ class Pattern_Extractor():
                         
                         if state_change:
                             if extraction_type.split("-")[0] == "Empty":
-                                if stats[idx][1] < 3: # current number of bikes available
+                                if stats[idx][1] < criticality_threshold: # current number of bikes available
                                     hasAlmostCritical = True
                                 if stats[idx][1] == 0:
                                     hasCritical = True
                             else: # extraction_type.split("-")[0] == "Full"
-                                if stats[idx][0] < 3: # current number of docks available
+                                if stats[idx][0] < criticality_threshold: # current number of docks available
                                     hasAlmostCritical = True
                                 if stats[idx][0] == 0:
                                     hasCritical = True
+                        else:
+                            if extraction_type.split("-")[0] == "Empty":
+                                if (not hasCritical) and stats[idx][1] == 0 and (not wrap_states):
+                                    hasCritical = True
+                                    window_states.append((line[0][0], line[0][1], extraction_type.split("-")[0]))
+                                elif (not hasAlmostCritical) and stats[idx][1] < criticality_threshold:
+                                    hasAlmostCritical = True
+                                    window_states.append((line[0][0], line[0][1], f'Almost{extraction_type.split("-")[0]}'))
+
+                            else: # extraction_type.split("-")[0] == "Full"
+                                if (not hasCritical) and stats[idx][0] == 0 and (not wrap_states):
+                                    hasCritical = True
+                                    window_states.append((line[0][0], line[0][1], extraction_type.split("-")[0]))
+                                elif (not hasAlmostCritical) and stats[idx][0] < criticality_threshold:
+                                    hasAlmostCritical = True
+                                    window_states.append((line[0][0], line[0][1], f'Almost{extraction_type.split("-")[0]}'))
 
                     else:
                         # update variables
@@ -200,7 +226,7 @@ class Pattern_Extractor():
                             if (not hasCritical) and stats[idx][1] == 0 and (not wrap_states):
                                 hasCritical = True
                                 window_states.append((line[0][0], line[0][1], extraction_type.split("-")[0]))
-                            elif (not hasAlmostCritical) and stats[idx][1] < 3:
+                            elif (not hasAlmostCritical) and stats[idx][1] < criticality_threshold:
                                 hasAlmostCritical = True
                                 window_states.append((line[0][0], line[0][1], f'Almost{extraction_type.split("-")[0]}'))
                         
@@ -208,7 +234,7 @@ class Pattern_Extractor():
                             if (not hasCritical) and stats[idx][0] == 0 and (not wrap_states):
                                 hasCritical = True
                                 window_states.append((line[0][0], line[0][1], extraction_type.split("-")[0]))
-                            elif (not hasAlmostCritical) and stats[idx][0] < 3:
+                            elif (not hasAlmostCritical) and stats[idx][0] < criticality_threshold:
                                 hasAlmostCritical = True
                                 window_states.append((line[0][0], line[0][1], f'Almost{extraction_type.split("-")[0]}'))
                 
@@ -233,7 +259,17 @@ class Pattern_Extractor():
             get_map = unixRecords.map(lambda l: (l[1], f"{l[0]}_{l[2]}"))
 
         # get (window, "State0,State1,...")
-        reduceK = get_map.reduceByKey(lambda l1, l2 :(l1+','+l2)).sortByKey()
+        reduceK = get_map.reduceByKey(lambda l1, l2 :(l1+','+l2))
+        
+        if drop_nulls:
+            def filter_incomplete_stations(t):
+                stations = set()
+                states = t[1].split(',')
+                for state in states:
+                    stations.add(state.split('_')[0])
+                return len(stations) == tot_stations
+                
+            reduceK = reduceK.filter(filter_incomplete_stations)
         
         #obtain window, station-status for windowing
         def giveSplit(line):   
@@ -277,7 +313,7 @@ class Pattern_Extractor():
                 if neighborhood_type=='indegree':
                     if extraction_type=='Full-AlmostFull' or extraction_type=='Full-Decrease'or extraction_type == 'Full-Increase':
                         topX_neighborhood = edge_importance_df.value[edge_importance_df.value['end_id']==current_station][:n_neighbors]['start_id'].values
-                    else: # extraction_type=='Empty-AlmostEmpty' or extraction_type=='Empty-Decrease'
+                    else: # extraction_type=='Empty-AlmostEmpty' or extraction_type=='Empty-Decrease' or extraction_type == 'Empty-Decrease'
                         topX_neighborhood = edge_importance_df.value[edge_importance_df.value['start_id']==current_station]\
                         .sort_values(['start_id','count'], ascending=[True, False])[:n_neighbors]['end_id'].values
 
@@ -292,6 +328,10 @@ class Pattern_Extractor():
                         
                         # we are not interested in 'Decrease' state if extraction_type == 'Full-Increase'
                         if extraction_type == 'Full-Increase' and state == 'Decrease':
+                            continue
+                            
+                        # we are not interested in 'Increase' state if extraction_type == 'Empty-Decrease'
+                        if extraction_type == 'Empty-Decrease' and state == 'Increase':
                             continue
 
                         if current_station!=second_station:
@@ -756,6 +796,9 @@ class Pattern_Extractor():
         target: indicate desired critical state
         returns an RDD
         '''
+        if not (target == 'AlmostFull' or target == 'AlmostEmpty'):
+            raise ValueError("Not allowed target.")
+        
         #read file
         patterns = self.sc.textFile(patterns_path)
 
@@ -876,7 +919,7 @@ class Pattern_Extractor():
         return predictions
         
 
-    def test_rules(self, test_items, rules, match_threshold=1):
+    def test_rules(self, test_items, rules, match_threshold=1, target='AlmostFull'):
         '''
         Test filtered associative rules.
         test_items: RDD with all items to test
@@ -895,8 +938,8 @@ class Pattern_Extractor():
             y_true = 'Normal'
             match_count = 0
     
-            if re.search(r'AlmostFull_T._0', str(line[-1])):
-                y_true = 'AlmostFull'
+            if re.search(rf"{target}_T._0", str(line[-1])):
+                y_true = target
             
             y_pred = 'Normal'
             
@@ -912,24 +955,24 @@ class Pattern_Extractor():
                     match_count += 1
                     
                 if match_count >= match_threshold:
-                    y_pred = 'AlmostFull'
+                    y_pred = target
                     break
             
             return (y_pred, y_true)
         
-        predictions = test_items.rdd.filter(lambda t: len(t[0]) > 1).map(predict_item)
+        predictions = test_items.rdd.filter(lambda t: len(t[0]) == 3).map(predict_item)
         
         br_rules.unpersist()
         
         # map (y_pred, y_true) -> (TP|TN|FP|FN, 1)
         def map_confusion_data(line):
             if line[0] == line[1]:
-                if line[0]=='AlmostFull':
+                if line[0] == target:
                     return ('TP', 1)
                 else:
                     return ('TN', 1)
             else:
-                if line[0]=='AlmostFull':
+                if line[0] == target:
                     return ('FP', 1)
                 else:
                     return ('FN', 1)                
@@ -945,8 +988,14 @@ class Pattern_Extractor():
         '''
         total = sum(results.values())
         accuracy = (results['TP']+results['TN'])/total
-        precision = results['TP']/(results['TP']+results['FP'])
+        try:
+            precision = results['TP']/(results['TP']+results['FP'])
+        except:
+            precision = 'Nan'
         recall = results['TP']/(results['TP']+results['FN'])
-        f1 = 2*precision*recall/(precision+recall)
+        try:
+            f1 = 2*precision*recall/(precision+recall)
+        except:
+            f1 = 'Nan'
 
         return f"{extraction},{neighborhood},{conf_threshold},{match_threshold},{accuracy},{precision},{recall},{f1},{results['TP']},{results['TN']},{results['FP']},{results['FN']}\n"
