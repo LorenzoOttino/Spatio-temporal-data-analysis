@@ -55,7 +55,7 @@ class Pattern_Extractor():
 
 
     
-    def extract_items(self, extraction_type, neighborhood_type='distance', n_neighbors=5, incr_dec_threshold=1, wrap_states=False, state_change=False, for_test=False, drop_nulls=False, time_zone=None, tot_stations=35, importance_path='../../Data/edge_importance.csv'):
+    def extract_items(self, extraction_type, neighborhood_type='distance', n_neighbors=5, incr_dec_threshold=1, wrap_states=False, state_change=False, for_test=False, drop_nulls=False, time_zone=None, tot_stations=35, get_no_decr=False, get_no_incr=False, importance_path='../../Data/edge_importance.csv'):
         '''
         Extract all items with specified charachteristics
         extraction_type: target extraction type
@@ -68,6 +68,8 @@ class Pattern_Extractor():
         drop_nulls: boolean parameter. If true drops the records that do not have a state for all the stations
         time_zone:"X-Y". If defined filter only the records in the specified hours
         tot_stations: number of stations for drop_nulls. Not relevant if drop_nulls=False
+        get_no_decr: map NoDecrease state
+        get_no_incr: map NoIncrease state
         '''
         # parameters checking
         if not (extraction_type=='Full-AlmostFull' or extraction_type=='Empty-AlmostEmpty' or extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase' or extraction_type == 'Full-Increase' or extraction_type == 'Empty-Decrease'):
@@ -78,7 +80,10 @@ class Pattern_Extractor():
         # cache neighbors dictionary
         if neighborhood_type=='indegree':
             edge_importance_df = self.sc.broadcast(pd.read_csv(importance_path))
-            
+        
+        #check if mapping negative states for increase or decrease is reqired
+        get_negatives = get_no_incr or get_no_decr
+        
         interval = self.interval
         window_size = self.window_size
         maxDelta = self.maxDelta
@@ -237,6 +242,13 @@ class Pattern_Extractor():
                             elif (not hasAlmostCritical) and stats[idx][0] < criticality_threshold:
                                 hasAlmostCritical = True
                                 window_states.append((line[0][0], line[0][1], f'Almost{extraction_type.split("-")[0]}'))
+
+                if get_negatives:
+                    if not hasIncrease:
+                        window_states.append((line[0][0], line[0][1], 'NoIncrease'))
+                    if not hasDecrease:
+                        window_states.append((line[0][0], line[0][1], 'NoDecrease'))
+
                 
                 if not hasAlmostCritical and for_test:
                     window_states.append((line[0][0], line[0][1], 'Normal'))
@@ -311,7 +323,7 @@ class Pattern_Extractor():
                 list_tmp=[]
                 topX_neighborhood = []
                 if neighborhood_type=='indegree':
-                    if extraction_type=='Full-AlmostFull' or extraction_type=='Full-Decrease'or extraction_type == 'Full-Increase':
+                    if extraction_type=='Full-AlmostFull' or extraction_type=='Full-Decrease' or extraction_type == 'Full-Increase':
                         topX_neighborhood = edge_importance_df.value[edge_importance_df.value['end_id']==current_station][:n_neighbors]['start_id'].values
                     else: # extraction_type=='Empty-AlmostEmpty' or extraction_type=='Empty-Decrease' or extraction_type == 'Empty-Decrease'
                         topX_neighborhood = edge_importance_df.value[edge_importance_df.value['start_id']==current_station]\
@@ -326,8 +338,8 @@ class Pattern_Extractor():
                         second_station = int(item.split('_')[0])
                         state = item.split('_')[2]
                         
-                        # we are not interested in 'Decrease' state if extraction_type == 'Full-Increase'
-                        if extraction_type == 'Full-Increase' and state == 'Decrease':
+                        # we are not interested in 'Decrease' and 'NoIncrease' state if extraction_type == 'Full-Increase'
+                        if extraction_type == 'Full-Increase' and (state == 'Decrease' or state == 'NoIncrease'):
                             continue
                             
                         # we are not interested in 'Increase' state if extraction_type == 'Empty-Decrease'
@@ -335,9 +347,10 @@ class Pattern_Extractor():
                             continue
 
                         if current_station!=second_station:
-                            # we are interested in only one state if 
+                            # we are interested in two states only if 
                             # extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase'
-                            if (extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase') and state != extraction_type.split('-')[1]:
+                            # negative state for increase may not be mapped
+                            if (extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase') and (state != extraction_type.split('-')[1] and state != f"NoIncrease"):
                                 continue
                             
                             # check that station is needed or not if neighborhood_type=='indegree'
@@ -361,10 +374,16 @@ class Pattern_Extractor():
                                     second_lista_items.add(label)
                         else:
                             # for the "main" station
+                            
                             # we are not interested in 'Decrease' state if extraction_type == 'Full-Decrease'
                             # we are not interested in 'Increase' state if extraction_type == 'Empty-Increase'
                             if  (extraction_type == 'Full-Decrease' or extraction_type == 'Empty-Increase') and state == extraction_type.split('-')[1]:
                                 continue
+                            
+                            # we are not interested in 'NoIncrease' state if extraction_type == 'Full-Decrease'
+                            if extraction_type == 'Full-Decrease' and state == 'NoIncrease':
+                                continue
+                            
                             label=state+'_'+'T'+str(i)+'_'+str(0)
                             if label not in second_lista_items:
                                 second_lista.append(label)
@@ -991,11 +1010,11 @@ class Pattern_Extractor():
         try:
             precision = results['TP']/(results['TP']+results['FP'])
         except:
-            precision = 'Nan'
+            precision = np.nan
         recall = results['TP']/(results['TP']+results['FN'])
         try:
             f1 = 2*precision*recall/(precision+recall)
         except:
-            f1 = 'Nan'
+            f1 = np.nan
 
         return f"{extraction},{neighborhood},{conf_threshold},{match_threshold},{accuracy},{precision},{recall},{f1},{results['TP']},{results['TN']},{results['FP']},{results['FN']}\n"
